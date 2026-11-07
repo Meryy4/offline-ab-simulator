@@ -27,6 +27,7 @@ Estime la performance d'une nouvelle policy de recommandation **sans la déploye
 - Analyse de sensibilité au clipping
 - Export CSV du rapport
 - Demo intégrée avec ground truth connue
+- **Logging Weights & Biases** (optionnel) — historique de chaque run d'estimation
 
 ## Notebook : PySpark à l'échelle
 
@@ -41,7 +42,7 @@ Les données (~2 Go) sont téléchargées par le notebook et ne sont pas version
 
 ## Format des logs attendus
 
-CSV ou Parquet avec au minimum:
+CSV ou Parquet avec au minimum :
 
 | colonne | description |
 |---|---|
@@ -50,8 +51,40 @@ CSV ou Parquet avec au minimum:
 | `propensity_new` | proba sous la policy évaluée |
 | `product_id` (ou `item_id`) | identifiant de l'action (pour le DR) |
 
+## Weights & Biases — usage
+
+Le logging W&B est **désactivé par défaut** et se déclenche uniquement sur un clic explicite (« 📤 Logger ce run sur W&B »). C'est volontaire : Streamlit recalcule l'app à chaque changement de widget, donc sans ce bouton on créerait un run W&B à chaque interaction.
+
+### Setup rapide
+
+```bash
+pip install wandb
+export WANDB_API_KEY="ta_cle"   # facultatif : sans clé, tombe en mode offline
+streamlit run app.py
+```
+
+Sans `WANDB_API_KEY`, l'app propose automatiquement le mode **offline** : tout est stocké dans `./wandb/` et peut être synchronisé plus tard avec `wandb sync ./wandb/latest-run`.
+
+### Ce qui est loggé pour chaque run
+
+| Catégorie | Contenu |
+|---|---|
+| **Config** | source (demo/upload), n, clip, seed, n_bootstrap, colonnes choisies |
+| **Metrics** | V̂_IPS, V̂_SNIPS, V̂_DR + IC 95%, ESS, ESS ratio, max/p99/median des poids, `frac_clipped` |
+| **Ground truth** (demo) | `true_value`, `err_IPS`, `err_SNIPS`, `err_DR` |
+| **Plots** | histogramme des poids, courbe sensibilité au clipping |
+| **Tables** | tableau clip → (IPS, SNIPS) |
+| **Artifacts** | rapport CSV versionné |
+
+### Usage typique
+
+- Comparer 10 valeurs de `clip` → dashboard trace V̂ en fonction de τ automatiquement
+- Comparer 3 seeds pour vérifier la stabilité du bootstrap
+- Comparer plusieurs datasets uploadés → tableau W&B tri/filtre par `source`
+
 ## Références
 
 - Dudík, Langford, Li (2011) — *Doubly Robust Policy Evaluation and Learning*
 - Swaminathan, Joachims (2015) — *The Self-Normalized Estimator for Counterfactual Learning*
 - [Open Bandit Dataset](https://github.com/st-tech/zr-obp) (ZOZO)
+- [W&B docs](https://docs.wandb.ai/)

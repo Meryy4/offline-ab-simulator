@@ -7,11 +7,19 @@ Run: streamlit run app.py
 """
 
 import io
+import os
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
+
+# W&B est optionnel : l'app tourne meme sans (ex. si `wandb` pas installe).
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +113,11 @@ def diagnose_weights(w: np.ndarray) -> list[tuple[str, str]]:
     return msgs
 
 
+def compute_ess(w: np.ndarray) -> float:
+    """Effective sample size."""
+    return float((w.sum() ** 2) / (w**2).sum())
+
+
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
@@ -141,7 +154,7 @@ def load_uploaded(file) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Sidebar — data + params
+# Sidebar — data + params + W&B
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.header("1. Données")
@@ -186,6 +199,33 @@ with st.sidebar:
     clip_val = st.slider("Clip max des poids", 1, 1000, 100, disabled=not clip_on)
     n_boot = st.slider("Bootstrap iterations (CI)", 100, 2000, 500, step=100)
     seed = st.number_input("Random seed", value=0, step=1)
+
+    # -----------------------------------------------------------------------
+    # W&B section
+    # -----------------------------------------------------------------------
+    st.header("4. Weights & Biases")
+    if not WANDB_AVAILABLE:
+        st.info("`wandb` pas installé. `pip install wandb` pour activer.")
+        wandb_enabled = False
+        wandb_project = None
+        wandb_run_name = None
+        wandb_mode = "disabled"
+    else:
+        wandb_enabled = st.checkbox("Activer le logging W&B", value=False)
+        wandb_project = st.text_input("Project", value="offline-ab-simulator", disabled=not wandb_enabled)
+        wandb_run_name = st.text_input(
+            "Run name (vide = auto)",
+            value="",
+            disabled=not wandb_enabled,
+            help="Ex: 'demo_clip100_seed0'. Laisse vide pour un nom auto.",
+        )
+        wandb_mode = st.selectbox(
+            "Mode",
+            ["online", "offline"],
+            index=0 if os.environ.get("WANDB_API_KEY") else 1,
+            disabled=not wandb_enabled,
+            help="online = envoi au cloud W&B (requiert WANDB_API_KEY). offline = tout stocké en local dans ./wandb/",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -247,8 +287,6 @@ r_hat_map = pd.Series(r[mask_train]).groupby(pd.Series(items[mask_train])).mean(
 r_hat_full = pd.Series(items).map(r_hat_map).fillna(r_hat_map.mean()).to_numpy()
 
 # Direct term: E_{a ~ policy_new}[r_hat(a)] approximé via reweight
-# On approxime en pondérant chaque log par prop_new / uniforme, puis mean * n_items est pas simple
-# → approximation raisonnable: mean de r_hat pondéré par prop_new / prop_log (Direct method plug-in)
 direct_term = float((p_new / p_log * r_hat_full * mask_train).sum() / max(mask_train.sum(), 1))
 
 w_eval = w.copy()
@@ -303,12 +341,12 @@ st.subheader("📉 Analyse")
 tab1, tab2 = st.tabs(["Distribution des poids", "Sensibilité au clipping"])
 
 with tab1:
-    fig, ax = plt.subplots(figsize=(9, 4))
+    fig_weights, ax = plt.subplots(figsize=(9, 4))
     ax.hist(np.log10(np.clip(w, 1e-6, None)), bins=60, color="#4C78A8")
     ax.set_xlabel("log10(poids IPS)")
     ax.set_ylabel("fréquence")
     ax.set_title("Distribution des poids d'importance")
-    st.pyplot(fig, use_container_width=True)
+    st.pyplot(fig_weights, use_container_width=True)
 
 with tab2:
     clip_grid = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000]
@@ -318,7 +356,7 @@ with tab2:
         rows.append({"clip": c, "IPS": ips(wc, r), "SNIPS": snips(wc, r)})
     clip_df = pd.DataFrame(rows)
 
-    fig, ax = plt.subplots(figsize=(9, 4))
+    fig_clip, ax = plt.subplots(figsize=(9, 4))
     ax.plot(clip_df["clip"], clip_df["IPS"], marker="o", label="IPS")
     ax.plot(clip_df["clip"], clip_df["SNIPS"], marker="s", label="SNIPS")
     if true_value is not None:
@@ -328,14 +366,16 @@ with tab2:
     ax.set_ylabel("estimation")
     ax.set_title("Sensibilité au clipping")
     ax.legend()
-    st.pyplot(fig, use_container_width=True)
+    st.pyplot(fig_clip, use_container_width=True)
 
     st.dataframe(clip_df, use_container_width=True, hide_index=True)
 
 # ---------------------------------------------------------------------------
-# Export
+# Export + W&B logging
 # ---------------------------------------------------------------------------
 st.subheader("💾 Export")
+
+# Rapport CSV (comme avant)
 report = pd.DataFrame(
     {
         "metric": ["IPS", "IPS_CI_low", "IPS_CI_high", "SNIPS", "SNIPS_CI_low", "SNIPS_CI_high", "DR", "n", "clip"],
@@ -354,7 +394,111 @@ report = pd.DataFrame(
 )
 buf = io.StringIO()
 report.to_csv(buf, index=False)
-st.download_button("Télécharger le rapport (CSV)", buf.getvalue(), "offpolicy_report.csv", "text/csv")
+
+col_dl, col_wb = st.columns(2)
+with col_dl:
+    st.download_button("Télécharger le rapport (CSV)", buf.getvalue(), "offpolicy_report.csv", "text/csv")
+
+with col_wb:
+    if wandb_enabled and WANDB_AVAILABLE:
+        # IMPORTANT : bouton explicite. Sinon Streamlit rerun => 1 run W&B par
+        # interaction, ce qui pollue le project. Le clic = "je valide ce run".
+        log_clicked = st.button("📤 Logger ce run sur W&B", type="primary")
+    else:
+        log_clicked = False
+        if not WANDB_AVAILABLE:
+            st.caption("Installe `wandb` pour activer le logging.")
+        else:
+            st.caption("Coche « Activer le logging W&B » dans la sidebar.")
+
+# -----------------------------------------------------------------------
+# W&B run — declenche uniquement sur clic explicite
+# -----------------------------------------------------------------------
+if wandb_enabled and WANDB_AVAILABLE and log_clicked:
+    ess = compute_ess(w)
+    frac_clipped = float((w == clip).mean()) if clip is not None else 0.0
+
+    config = {
+        "source": "demo" if source.startswith("Demo") else "upload",
+        "n_samples": n,
+        "clip": clip if clip is not None else -1,   # -1 = pas de clipping
+        "clip_enabled": clip_on,
+        "seed": int(seed),
+        "n_bootstrap": int(n_boot),
+        "col_reward": col_reward,
+        "col_propensity_log": col_prop_log,
+        "col_propensity_new": col_prop_new,
+        "col_item": col_item,
+    }
+
+    try:
+        run = wandb.init(
+            project=wandb_project,
+            name=wandb_run_name or None,
+            mode=wandb_mode,
+            config=config,
+            reinit=True,
+        )
+
+        metrics = {
+            # estimateurs
+            "V_IPS": ips_hat,
+            "V_IPS_ci_low": ips_hat - ips_ci,
+            "V_IPS_ci_high": ips_hat + ips_ci,
+            "V_IPS_ci_halfwidth": float(ips_ci),
+            "V_SNIPS": snips_hat,
+            "V_SNIPS_ci_low": snips_lo,
+            "V_SNIPS_ci_high": snips_hi,
+            "V_DR": dr_hat,
+            # diagnostics
+            "ess": ess,
+            "ess_ratio": ess / n,
+            "weight_max": float(w.max()),
+            "weight_p99": float(np.percentile(w, 99)),
+            "weight_median": float(np.median(w)),
+            "frac_clipped": frac_clipped,
+        }
+
+        # Si demo, on connait la ground truth => on log les erreurs
+        if true_value is not None:
+            metrics.update(
+                {
+                    "true_value": true_value,
+                    "err_IPS": abs(ips_hat - true_value),
+                    "err_SNIPS": abs(snips_hat - true_value),
+                    "err_DR": abs(dr_hat - true_value),
+                }
+            )
+
+        wandb.log(metrics)
+
+        # Plots (matplotlib figures)
+        wandb.log({"plot/weights_hist": wandb.Image(fig_weights)})
+        wandb.log({"plot/clip_sensitivity": wandb.Image(fig_clip)})
+
+        # Tableau de la sensibilite au clipping
+        wandb.log(
+            {"table/clip_sensitivity": wandb.Table(dataframe=clip_df)}
+        )
+
+        # Rapport CSV en artefact (versionne)
+        artifact = wandb.Artifact(name="offpolicy_report", type="report")
+        with artifact.new_file("offpolicy_report.csv", mode="w") as f:
+            f.write(buf.getvalue())
+        run.log_artifact(artifact)
+
+        run_url = run.get_url() if wandb_mode == "online" else None
+        wandb.finish()
+
+        if run_url:
+            st.success(f"✅ Run loggé. [Voir sur W&B]({run_url})")
+        else:
+            st.success(
+                "✅ Run loggé en mode offline dans `./wandb/`. "
+                "Pour l'uploader plus tard : `wandb sync ./wandb/latest-run`"
+            )
+    except Exception as e:
+        st.error(f"W&B error: {e}")
 
 st.caption(
     "Rappel: IPS est non biaisé mais haute variance. SNIPS est biaisé mais stable. "
