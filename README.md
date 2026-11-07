@@ -28,6 +28,17 @@ Estime la performance d'une nouvelle policy de recommandation **sans la déploye
 - Export CSV du rapport
 - Demo intégrée avec ground truth connue
 
+## Notebook : PySpark à l'échelle
+
+[`offline_ab_simulator.ipynb`](offline_ab_simulator.ipynb) contient l'analyse complète :
+
+1. les trois estimateurs expliqués sur un exemple de 6 lignes ;
+2. PySpark sur 1M de logs simulés avec ground truth connue, et convergence des estimateurs selon la taille d'échantillon ;
+3. benchmark Pandas vs PySpark ;
+4. **Open Bandit Dataset (ZOZOTOWN, 12M lignes)** : IPS, SNIPS et Doubly Robust comparés à la ground truth de la policy random, analyse du clipping, intervalles de confiance à 95 %, puis le même calcul en PySpark.
+
+Les données (~2 Go) sont téléchargées par le notebook et ne sont pas versionnées.
+
 ## Format des logs attendus
 
 CSV ou Parquet avec au minimum:
